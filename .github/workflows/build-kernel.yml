@@ -38,6 +38,91 @@ jobs:
         curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
         cd ..
 
+    - name: Manually patch ReSukiSU hooks
+      run: |
+        cd kernel
+
+        # Patch fs/exec.c for ksu_handle_execveat
+        sed -i '/static int do_execveat_common/i \
+        #ifdef CONFIG_KSU_MANUAL_HOOK \
+        __attribute__((hot)) \
+        extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, \
+				        void *argv, void *envp, int *flags); \
+        #endif' fs/exec.c
+
+        sed -i '/int do_execve(struct filename *filename,/a \
+        #ifdef CONFIG_KSU_MANUAL_HOOK \
+        	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0); \
+        #endif' fs/exec.c
+
+        sed -i '/static int compat_do_execve(struct filename *filename,/a \
+        #ifdef CONFIG_KSU_MANUAL_HOOK \
+        	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0); \
+        #endif' fs/exec.c
+
+        # Patch fs/stat.c for ksu_handle_stat and ret hooks
+        sed -i '/SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,/i \
+        #ifdef CONFIG_KSU_MANUAL_HOOK \
+        __attribute__((hot)) \
+        extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags); \
+        extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr); \
+        #if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64) \
+        extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr); \
+        #endif \
+        #endif' fs/stat.c
+
+        sed -i '/error = vfs_fstatat(dfd, filename, &stat, flag);/a \
+        #ifdef CONFIG_KSU_MANUAL_HOOK \
+        	ksu_handle_stat(&dfd, &filename, &flag); \
+        #endif' fs/stat.c
+
+        sed -i '/SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)/a \
+        #ifdef CONFIG_KSU_MANUAL_HOOK \
+        	ksu_handle_newfstat_ret(&fd, &statbuf); \
+        #endif' fs/stat.c
+
+        sed -i '/SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)/a \
+        #ifdef CONFIG_KSU_MANUAL_HOOK \
+        	ksu_handle_fstat64_ret(&fd, &statbuf); \
+        #endif' fs/stat.c
+
+        # Patch kernel/reboot.c for ksu_handle_sys_reboot
+        sed -i '/SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,/i \
+        #ifdef CONFIG_KSU_MANUAL_HOOK \
+        extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg); \
+        #endif' kernel/reboot.c
+
+        sed -i '/if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))/a \
+        #ifdef CONFIG_KSU_MANUAL_HOOK \
+        	ksu_handle_sys_reboot(magic1, magic2, cmd, &arg); \
+        #endif' kernel/reboot.c
+
+        # Patch fs/open.c for ksu_handle_faccessat
+        sed -i '/SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)/i \
+        #ifdef CONFIG_KSU_MANUAL_HOOK \
+        __attribute__((hot)) \
+        extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, \
+				        int *mode, int *flags); \
+        #endif' fs/open.c
+
+        sed -i '/return do_faccessat(dfd, filename, mode);/a \
+        #ifdef CONFIG_KSU_MANUAL_HOOK \
+        	ksu_handle_faccessat(&dfd, &filename, &mode, NULL); \
+        #endif' fs/open.c
+
+        # Patch security/selinux/hooks.c for SELinux hook (required for 4.9)
+        sed -i '/static int check_nnp_nosuid(const struct linux_binprm *bprm,/i \
+        #ifdef CONFIG_KSU_MANUAL_HOOK \
+        extern bool is_ksu_transition(const struct task_security_struct *old_tsec, \
+				        const struct task_security_struct *new_tsec); \
+        #endif' security/selinux/hooks.c
+
+        sed -i '/if (new_tsec->sid == old_tsec->sid)/a \
+        #ifdef CONFIG_KSU_MANUAL_HOOK \
+        	if (is_ksu_transition(old_tsec, new_tsec)) \
+        		return 0; \
+        #endif' security/selinux/hooks.c
+
     - name: Configure and build kernel
       run: |
         export ARCH=arm64
