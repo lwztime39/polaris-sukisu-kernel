@@ -1,13 +1,13 @@
 name: Build Polaris Kernel with ReSukiSU (基础 root, 无 SUSFS)
 
 on:
-  workflow_dispatch:          # 手动触发测试
+  workflow_dispatch:
   push:
-    branches: [ main ]        # push main 自动触发（可选）
+    branches: [ main ]
 
 jobs:
   build:
-    runs-on: ubuntu-24.04     # 性能好，glibc 新
+    runs-on: ubuntu-24.04
 
     steps:
     - name: Checkout your repo
@@ -18,32 +18,24 @@ jobs:
         sudo apt update
         sudo apt install -y bc bison build-essential flex git zip unzip ccache libelf-dev libssl-dev python3 lz4 bc libncurses5-dev libncursesw5-dev binutils
 
-    - name: Setup ZyCromerZ Proton-Clang toolchain (最新版，支持新 glibc)
+    - name: Setup ZyCromerZ Proton-Clang toolchain
       run: |
-        # 下载最新 ZyCromerZ Clang (20260208 构建，clang 15.0.7)
         curl -L https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20260208-release/Clang-15.0.7-20260208.tar.gz -o clang.tar.gz
         mkdir -p proton-clang
         tar -xzf clang.tar.gz -C proton-clang --strip-components=1
         echo "$(pwd)/proton-clang/bin" >> $GITHUB_PATH
-        which clang
-        clang --version   # 打印版本确认
-        ld --version      # 确认 ld 版本（如果报 .relr.dyn 还是用 bfd 覆盖）
 
-    - name: Clone LineageOS polaris kernel (2025-12-18 state)
+    - name: Clone LineageOS polaris kernel
       run: |
         git clone https://github.com/LineageOS/android_kernel_xiaomi_sdm845 kernel -b lineage-22.2 --depth=50
         cd kernel
         git checkout $(git rev-list -n 1 --before="2025-12-19 00:00" lineage-22.2)
         cd ..
 
-    - name: Integrate ReSukiSU (官方 setup.sh, 无 SUSFS)
+    - name: Integrate ReSukiSU
       run: |
         cd kernel
-        # 直接运行官方 setup.sh（无参数，自动 patch 基础 ReSukiSU）
         curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
-        # 检查 patch
-        ls drivers/ | grep -i 'ksu' || echo "KSU dir not found, check setup.sh"
-        grep -i ksu ../out/.config 2>/dev/null || echo "KSU not in .config yet"
         cd ..
 
     - name: Configure and build kernel
@@ -54,19 +46,23 @@ jobs:
         export CC=clang
         export CLANG_TRIPLE=aarch64-linux-gnu-
         export HOSTCC=clang
-        export LD=ld.bfd               # 强制用系统 bfd ld，避免 .relr.dyn 问题
+        export LD=ld.bfd
         export HOSTLD=ld.bfd
         export USE_CCACHE=1
         ccache -M 10G
 
         cd kernel
         mkdir -p out
-        # polaris defconfig（确认是 mi845_defconfig，根据你的源码）
-        make O=out ARCH=arm64 mi845_defconfig
-        # 启用基础 CONFIG_KSU=y（不加 SUSFS）
+
+        make O=out ARCH=arm64 sdm845_defconfig
+
+        if [ -f arch/arm64/configs/vendor/xiaomi/mi845_defconfig ]; then
+          cat arch/arm64/configs/vendor/xiaomi/mi845_defconfig >> out/.config
+          make O=out olddefconfig
+        fi
+
         sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config || true
         sed -i 's/# CONFIG_KSU_MANUAL_HOOK is not set/CONFIG_KSU_MANUAL_HOOK=y/' out/.config || true
-        # 可选 KPM / KALLSYMS（4.9 内核实验性）
         sed -i 's/# CONFIG_KPM is not set/CONFIG_KPM=y/' out/.config || true
         sed -i 's/# CONFIG_KALLSYMS is not set/CONFIG_KALLSYMS=y/' out/.config
         sed -i 's/# CONFIG_KALLSYMS_ALL is not set/CONFIG_KALLSYMS_ALL=y/' out/.config
@@ -76,11 +72,11 @@ jobs:
     - name: Package with AnyKernel3
       run: |
         git clone https://github.com/osm0sis/AnyKernel3 --depth=1
-        cp kernel/out/arch/arm64/boot/Image* AnyKernel3/   # Image.gz-dtb 或 Image + dtb
+        cp kernel/out/arch/arm64/boot/Image* AnyKernel3/
         cd AnyKernel3
         sed -i 's/device.name1=.*/device.name1=polaris/' anykernel.sh
         sed -i 's/block=.*/block=\/dev\/block\/bootdevice\/by-name\/boot;/' anykernel.sh
-        sed -i 's/ramdisk=.*/ramdisk=0;/' anykernel.sh   # su 内置内核，不 patch ramdisk
+        sed -i 's/ramdisk=.*/ramdisk=0;/' anykernel.sh
         zip -r ../resukisu-polaris-basic-$(date +%Y%m%d).zip *
         cd ..
 
@@ -91,9 +87,9 @@ jobs:
         path: resukisu-polaris-basic-*.zip
         retention-days: 7
 
-    - name: Upload build log if failed (debug)
+    - name: Upload build log if failed
       if: failure()
       uses: actions/upload-artifact@v4
       with:
-        name: build-log
+        name: build-log-failed
         path: kernel/build.log
