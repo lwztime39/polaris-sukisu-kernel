@@ -16,7 +16,7 @@ jobs:
     - name: Install build dependencies
       run: |
         sudo apt update
-        sudo apt install -y bc bison build-essential flex git zip unzip ccache libelf-dev libssl-dev python3 lz4 bc libncurses5-dev libncursesw5-dev binutils
+        sudo apt install -y bc bison build-essential flex git zip unzip ccache libelf-dev libssl-dev python3 lz4 bc libncurses5-dev libncursesw5-dev binutils gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
 
     - name: Setup ZyCromerZ Proton-Clang toolchain
       run: |
@@ -58,8 +58,13 @@ jobs:
 
         if [ -f arch/arm64/configs/vendor/xiaomi/mi845_defconfig ]; then
           cat arch/arm64/configs/vendor/xiaomi/mi845_defconfig >> out/.config
-          make O=out olddefconfig
         fi
+
+        if [ -f arch/arm64/configs/vendor/xiaomi/polaris.config ]; then
+          cat arch/arm64/configs/vendor/xiaomi/polaris.config >> out/.config
+        fi
+
+        yes "" | make O=out oldconfig
 
         sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config || true
         sed -i 's/# CONFIG_KSU_MANUAL_HOOK is not set/CONFIG_KSU_MANUAL_HOOK=y/' out/.config || true
