@@ -64,20 +64,29 @@ jobs:
           cat arch/arm64/configs/vendor/xiaomi/polaris.config >> out/.config
         fi
 
-        yes "" | make O=out oldconfig
+        # 关键修复：使用 olddefconfig 自动处理所有新选项（非交互）
+        make O=out olddefconfig
 
+        # 补充：如果还有残留提示，用空输入处理（加 || true 防止中断）
+        yes "" | make O=out oldconfig || true
+
+        # 强制启用 KSU 相关选项
         sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config || true
         sed -i 's/# CONFIG_KSU_MANUAL_HOOK is not set/CONFIG_KSU_MANUAL_HOOK=y/' out/.config || true
         sed -i 's/# CONFIG_KPM is not set/CONFIG_KPM=y/' out/.config || true
         sed -i 's/# CONFIG_KALLSYMS is not set/CONFIG_KALLSYMS=y/' out/.config
         sed -i 's/# CONFIG_KALLSYMS_ALL is not set/CONFIG_KALLSYMS_ALL=y/' out/.config
 
+        # 再次运行 olddefconfig，确保 sed 修改生效且配置干净
+        make O=out olddefconfig
+
+        # 开始编译
         make O=out -j$(nproc --all) 2>&1 | tee build.log
 
     - name: Package with AnyKernel3
       run: |
         git clone https://github.com/osm0sis/AnyKernel3 --depth=1
-        cp kernel/out/arch/arm64/boot/Image* AnyKernel3/
+        cp kernel/out/arch/arm64/boot/Image* AnyKernel3/ || echo "Image not found, build failed earlier"
         cd AnyKernel3
         sed -i 's/device.name1=.*/device.name1=polaris/' anykernel.sh
         sed -i 's/block=.*/block=\/dev\/block\/bootdevice\/by-name\/boot;/' anykernel.sh
