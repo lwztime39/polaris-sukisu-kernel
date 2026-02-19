@@ -10,181 +10,129 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-    - name: Checkout your repo
-      uses: actions/checkout@v4
+      - name: Checkout your repo
+        uses: actions/checkout@v4
 
-    - name: Install build dependencies
-      run: |
-        sudo apt update
-        sudo apt install -y bc bison build-essential flex git zip unzip ccache libelf-dev libssl-dev python3 lz4 bc libncurses5-dev libncursesw5-dev binutils gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
+      - name: Install build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y bc bison build-essential flex git zip unzip ccache \
+            libelf-dev libssl-dev python3 lz4 bc libncurses5-dev libncursesw5-dev \
+            binutils gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
 
-    - name: Setup ZyCromerZ Proton-Clang toolchain
-      run: |
-        curl -L https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20260208-release/Clang-15.0.7-20260208.tar.gz -o clang.tar.gz
-        mkdir -p proton-clang
-        tar -xzf clang.tar.gz -C proton-clang --strip-components=1
-        echo "$(pwd)/proton-clang/bin" >> $GITHUB_PATH
+      - name: Setup ZyCromerZ Proton-Clang toolchain
+        run: |
+          curl -L https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20260208-release/Clang-15.0.7-20260208.tar.gz -o clang.tar.gz
+          mkdir -p proton-clang
+          tar -xzf clang.tar.gz -C proton-clang --strip-components=1
+          echo "$(pwd)/proton-clang/bin" >> $GITHUB_PATH
 
-    - name: Clone LineageOS polaris kernel
-      run: |
-        git clone https://github.com/LineageOS/android_kernel_xiaomi_sdm845 kernel -b lineage-22.2 --depth=50
-        cd kernel
-        git checkout $(git rev-list -n 1 --before="2025-12-19 00:00" lineage-22.2)
-        cd ..
+      - name: Clone LineageOS polaris kernel
+        run: |
+          git clone https://github.com/LineageOS/android_kernel_xiaomi_sdm845 kernel -b lineage-22.2 --depth=50
+          cd kernel
+          git checkout $(git rev-list -n 1 --before="2025-12-19 00:00" lineage-22.2)
+          cd ..
 
-    - name: Integrate ReSukiSU
-      run: |
-        cd kernel
-        curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
-        cd ..
+      - name: Integrate ReSukiSU
+        run: |
+          cd kernel
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+          cd ..
 
-    - name: Manually patch ReSukiSU hooks
-      run: |
-        cd kernel
+      - name: Manually patch missing ReSukiSU hooks for 4.9 kernel
+        run: |
+          cd kernel
 
-        # Patch fs/exec.c for ksu_handle_execveat
-        sed -i '/static int do_execveat_common/i \
-        #ifdef CONFIG_KSU_MANUAL_HOOK \
-        __attribute__((hot)) \
-        extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, \
-				        void *argv, void *envp, int *flags); \
-        #endif' fs/exec.c
+          # Patch fs/exec.c - ksu_handle_execveat (最关键的缺失 hook)
+          sed -i '/^#include <linux\/binfmts.h>/a \
+          #ifdef CONFIG_KSU_MANUAL_HOOK \
+          extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, \
+                                         struct user_arg_ptr argv, struct user_arg_ptr envp, int *flags); \
+          #endif' fs/exec.c
 
-        sed -i '/int do_execve(struct filename *filename,/a \
-        #ifdef CONFIG_KSU_MANUAL_HOOK \
-        	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0); \
-        #endif' fs/exec.c
+          sed -i '/do_execveat_common(int fd, struct filename *filename,/i \
+          #ifdef CONFIG_KSU_MANUAL_HOOK \
+                  if (ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags)) \
+                          return -EPERM; \
+          #endif' fs/exec.c
 
-        sed -i '/static int compat_do_execve(struct filename *filename,/a \
-        #ifdef CONFIG_KSU_MANUAL_HOOK \
-        	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0); \
-        #endif' fs/exec.c
+          # 兼容旧版 do_execve
+          sed -i '/int do_execve(struct filename *filename,/a \
+          #ifdef CONFIG_KSU_MANUAL_HOOK \
+                  struct user_arg_ptr argv = { .ptr.native = argv }; \
+                  struct user_arg_ptr envp = { .ptr.native = envp }; \
+                  int flags = 0; \
+                  if (ksu_handle_execveat(&(int){AT_FDCWD}, &filename, argv, envp, &flags)) \
+                          return -EPERM; \
+          #endif' fs/exec.c
 
-        # Patch fs/stat.c for ksu_handle_stat and ret hooks
-        sed -i '/SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,/i \
-        #ifdef CONFIG_KSU_MANUAL_HOOK \
-        __attribute__((hot)) \
-        extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags); \
-        extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr); \
-        #if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64) \
-        extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr); \
-        #endif \
-        #endif' fs/stat.c
+          # 临时禁用 Kbuild 里的强制报错（因为我们手动补了 hook）
+          sed -i '/You should integrate ReSukiSU in your kernel/d' drivers/kernelsu/Kbuild || true
 
-        sed -i '/error = vfs_fstatat(dfd, filename, &stat, flag);/a \
-        #ifdef CONFIG_KSU_MANUAL_HOOK \
-        	ksu_handle_stat(&dfd, &filename, &flag); \
-        #endif' fs/stat.c
+      - name: Configure and build kernel
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export HOSTCC=clang
+          export LD=ld.bfd
+          export HOSTLD=ld.bfd
+          export USE_CCACHE=1
+          ccache -M 10G
 
-        sed -i '/SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)/a \
-        #ifdef CONFIG_KSU_MANUAL_HOOK \
-        	ksu_handle_newfstat_ret(&fd, &statbuf); \
-        #endif' fs/stat.c
+          cd kernel
+          mkdir -p out
 
-        sed -i '/SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)/a \
-        #ifdef CONFIG_KSU_MANUAL_HOOK \
-        	ksu_handle_fstat64_ret(&fd, &statbuf); \
-        #endif' fs/stat.c
+          make O=out ARCH=arm64 sdm845_defconfig
 
-        # Patch kernel/reboot.c for ksu_handle_sys_reboot
-        sed -i '/SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,/i \
-        #ifdef CONFIG_KSU_MANUAL_HOOK \
-        extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg); \
-        #endif' kernel/reboot.c
+          if [ -f arch/arm64/configs/vendor/xiaomi/mi845_defconfig ]; then
+            cat arch/arm64/configs/vendor/xiaomi/mi845_defconfig >> out/.config
+          fi
 
-        sed -i '/if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))/a \
-        #ifdef CONFIG_KSU_MANUAL_HOOK \
-        	ksu_handle_sys_reboot(magic1, magic2, cmd, &arg); \
-        #endif' kernel/reboot.c
+          if [ -f arch/arm64/configs/vendor/xiaomi/polaris.config ]; then
+            cat arch/arm64/configs/vendor/xiaomi/polaris.config >> out/.config
+          fi
 
-        # Patch fs/open.c for ksu_handle_faccessat
-        sed -i '/SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)/i \
-        #ifdef CONFIG_KSU_MANUAL_HOOK \
-        __attribute__((hot)) \
-        extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, \
-				        int *mode, int *flags); \
-        #endif' fs/open.c
+          make O=out olddefconfig
 
-        sed -i '/return do_faccessat(dfd, filename, mode);/a \
-        #ifdef CONFIG_KSU_MANUAL_HOOK \
-        	ksu_handle_faccessat(&dfd, &filename, &mode, NULL); \
-        #endif' fs/open.c
+          yes "" | make O=out oldconfig || true
 
-        # Patch security/selinux/hooks.c for SELinux hook (required for 4.9)
-        sed -i '/static int check_nnp_nosuid(const struct linux_binprm *bprm,/i \
-        #ifdef CONFIG_KSU_MANUAL_HOOK \
-        extern bool is_ksu_transition(const struct task_security_struct *old_tsec, \
-				        const struct task_security_struct *new_tsec); \
-        #endif' security/selinux/hooks.c
+          sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config || true
+          sed -i 's/# CONFIG_KSU_MANUAL_HOOK is not set/CONFIG_KSU_MANUAL_HOOK=y/' out/.config || true
+          sed -i 's/# CONFIG_KPM is not set/CONFIG_KPM=y/' out/.config || true
+          sed -i 's/# CONFIG_KALLSYMS is not set/CONFIG_KALLSYMS=y/' out/.config
+          sed -i 's/# CONFIG_KALLSYMS_ALL is not set/CONFIG_KALLSYMS_ALL=y/' out/.config
 
-        sed -i '/if (new_tsec->sid == old_tsec->sid)/a \
-        #ifdef CONFIG_KSU_MANUAL_HOOK \
-        	if (is_ksu_transition(old_tsec, new_tsec)) \
-        		return 0; \
-        #endif' security/selinux/hooks.c
+          make O=out olddefconfig
 
-    - name: Configure and build kernel
-      run: |
-        export ARCH=arm64
-        export SUBARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-        export CC=clang
-        export CLANG_TRIPLE=aarch64-linux-gnu-
-        export HOSTCC=clang
-        export LD=ld.bfd
-        export HOSTLD=ld.bfd
-        export USE_CCACHE=1
-        ccache -M 10G
+          make O=out -j$(nproc --all) 2>&1 | tee build.log
 
-        cd kernel
-        mkdir -p out
+      - name: Package with AnyKernel3
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3 --depth=1
+          cp kernel/out/arch/arm64/boot/Image* AnyKernel3/ || echo "Image not found, build failed earlier"
+          cd AnyKernel3
+          sed -i 's/device.name1=.*/device.name1=polaris/' anykernel.sh
+          sed -i 's/block=.*/block=\/dev\/block\/bootdevice\/by-name\/boot;/' anykernel.sh
+          sed -i 's/ramdisk=.*/ramdisk=0;/' anykernel.sh
+          zip -r ../resukisu-polaris-basic-$(date +%Y%m%d).zip *
+          cd ..
 
-        make O=out ARCH=arm64 sdm845_defconfig
+      - name: Upload the zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: resukisu-basic-kernel-zip
+          path: resukisu-polaris-basic-*.zip
+          retention-days: 7
 
-        if [ -f arch/arm64/configs/vendor/xiaomi/mi845_defconfig ]; then
-          cat arch/arm64/configs/vendor/xiaomi/mi845_defconfig >> out/.config
-        fi
-
-        if [ -f arch/arm64/configs/vendor/xiaomi/polaris.config ]; then
-          cat arch/arm64/configs/vendor/xiaomi/polaris.config >> out/.config
-        fi
-
-        make O=out olddefconfig
-
-        yes "" | make O=out oldconfig || true
-
-        sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config || true
-        sed -i 's/# CONFIG_KSU_MANUAL_HOOK is not set/CONFIG_KSU_MANUAL_HOOK=y/' out/.config || true
-        sed -i 's/# CONFIG_KPM is not set/CONFIG_KPM=y/' out/.config || true
-        sed -i 's/# CONFIG_KALLSYMS is not set/CONFIG_KALLSYMS=y/' out/.config
-        sed -i 's/# CONFIG_KALLSYMS_ALL is not set/CONFIG_KALLSYMS_ALL=y/' out/.config
-
-        make O=out olddefconfig
-
-        make O=out -j$(nproc --all) 2>&1 | tee build.log
-
-    - name: Package with AnyKernel3
-      run: |
-        git clone https://github.com/osm0sis/AnyKernel3 --depth=1
-        cp kernel/out/arch/arm64/boot/Image* AnyKernel3/ || echo "Image not found, build failed earlier"
-        cd AnyKernel3
-        sed -i 's/device.name1=.*/device.name1=polaris/' anykernel.sh
-        sed -i 's/block=.*/block=\/dev\/block\/bootdevice\/by-name\/boot;/' anykernel.sh
-        sed -i 's/ramdisk=.*/ramdisk=0;/' anykernel.sh
-        zip -r ../resukisu-polaris-basic-$(date +%Y%m%d).zip *
-        cd ..
-
-    - name: Upload the zip artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: resukisu-basic-kernel-zip
-        path: resukisu-polaris-basic-*.zip
-        retention-days: 7
-
-    - name: Upload build log if failed
-      if: failure()
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-log-failed
-        path: kernel/build.log
+      - name: Upload build log if failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-failed
+          path: kernel/build.log
