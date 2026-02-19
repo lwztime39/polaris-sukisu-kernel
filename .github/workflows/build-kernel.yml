@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04     # 性能好
+    runs-on: ubuntu-24.04     # 性能好，glibc 新
 
     steps:
     - name: Checkout your repo
@@ -16,12 +16,18 @@ jobs:
     - name: Install build dependencies
       run: |
         sudo apt update
-        sudo apt install -y bc bison build-essential flex git zip unzip ccache libelf-dev libssl-dev python3 lz4 bc libncurses5-dev libncursesw5-dev
+        sudo apt install -y bc bison build-essential flex git zip unzip ccache libelf-dev libssl-dev python3 lz4 bc libncurses5-dev libncursesw5-dev binutils
 
-    - name: Setup Proton-Clang toolchain (适合 4.9 non-GKI)
+    - name: Setup ZyCromerZ Proton-Clang toolchain (最新版，支持新 glibc)
       run: |
-        git clone --depth=1 https://github.com/kdrag0n/proton-clang
+        # 下载最新 ZyCromerZ Clang (20260208 构建，clang 15.0.7)
+        curl -L https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20260208-release/Clang-15.0.7-20260208.tar.gz -o clang.tar.gz
+        mkdir -p proton-clang
+        tar -xzf clang.tar.gz -C proton-clang --strip-components=1
         echo "$(pwd)/proton-clang/bin" >> $GITHUB_PATH
+        which clang
+        clang --version   # 打印版本确认
+        ld --version      # 确认 ld 版本（如果报 .relr.dyn 还是用 bfd 覆盖）
 
     - name: Clone LineageOS polaris kernel (2025-12-18 state)
       run: |
@@ -35,8 +41,9 @@ jobs:
         cd kernel
         # 直接运行官方 setup.sh（无参数，自动 patch 基础 ReSukiSU）
         curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
-        # 检查 patch（应该看到 ksu 相关目录）
-        ls drivers/ | grep -i 'ksu' || echo "Check if ksu dir appeared"
+        # 检查 patch
+        ls drivers/ | grep -i 'ksu' || echo "KSU dir not found, check setup.sh"
+        grep -i ksu ../out/.config 2>/dev/null || echo "KSU not in .config yet"
         cd ..
 
     - name: Configure and build kernel
@@ -46,17 +53,20 @@ jobs:
         export CROSS_COMPILE=aarch64-linux-gnu-
         export CC=clang
         export CLANG_TRIPLE=aarch64-linux-gnu-
+        export HOSTCC=clang
+        export LD=ld.bfd               # 强制用系统 bfd ld，避免 .relr.dyn 问题
+        export HOSTLD=ld.bfd
         export USE_CCACHE=1
         ccache -M 10G
 
         cd kernel
-        # polaris defconfig（sdm845/mi845 系列常用 mi845_defconfig，根据源码确认）
+        mkdir -p out
+        # polaris defconfig（确认是 mi845_defconfig，根据你的源码）
         make O=out ARCH=arm64 mi845_defconfig
-        # 只启用基础 CONFIG_KSU=y（不加 SUSFS）
+        # 启用基础 CONFIG_KSU=y（不加 SUSFS）
         sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config || true
-        # 可选：如果想手动钩子（官方推荐可选）
         sed -i 's/# CONFIG_KSU_MANUAL_HOOK is not set/CONFIG_KSU_MANUAL_HOOK=y/' out/.config || true
-        # KPM 实验可选（4.9 上可能不工作）
+        # 可选 KPM / KALLSYMS（4.9 内核实验性）
         sed -i 's/# CONFIG_KPM is not set/CONFIG_KPM=y/' out/.config || true
         sed -i 's/# CONFIG_KALLSYMS is not set/CONFIG_KALLSYMS=y/' out/.config
         sed -i 's/# CONFIG_KALLSYMS_ALL is not set/CONFIG_KALLSYMS_ALL=y/' out/.config
@@ -80,3 +90,10 @@ jobs:
         name: resukisu-basic-kernel-zip
         path: resukisu-polaris-basic-*.zip
         retention-days: 7
+
+    - name: Upload build log if failed (debug)
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-log
+        path: kernel/build.log
