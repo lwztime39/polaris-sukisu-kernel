@@ -1,0 +1,82 @@
+name: Build Polaris Kernel with ReSukiSU (基础 root, 无 SUSFS)
+
+on:
+  workflow_dispatch:          # 手动触发测试
+  push:
+    branches: [ main ]        # push main 自动触发（可选）
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04     # 性能好
+
+    steps:
+    - name: Checkout your repo
+      uses: actions/checkout@v4
+
+    - name: Install build dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y bc bison build-essential flex git zip unzip ccache libelf-dev libssl-dev python3 lz4 bc libncurses5-dev libncursesw5-dev
+
+    - name: Setup Proton-Clang toolchain (适合 4.9 non-GKI)
+      run: |
+        git clone --depth=1 https://github.com/kdrag0n/proton-clang
+        echo "$(pwd)/proton-clang/bin" >> $GITHUB_PATH
+
+    - name: Clone LineageOS polaris kernel (2025-12-18 state)
+      run: |
+        git clone https://github.com/LineageOS/android_kernel_xiaomi_sdm845 kernel -b lineage-22.2 --depth=50
+        cd kernel
+        git checkout $(git rev-list -n 1 --before="2025-12-19 00:00" lineage-22.2)
+        cd ..
+
+    - name: Integrate ReSukiSU (官方 setup.sh, 无 SUSFS)
+      run: |
+        cd kernel
+        # 直接运行官方 setup.sh（无参数，自动 patch 基础 ReSukiSU）
+        curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+        # 检查 patch（应该看到 ksu 相关目录）
+        ls drivers/ | grep -i 'ksu' || echo "Check if ksu dir appeared"
+        cd ..
+
+    - name: Configure and build kernel
+      run: |
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export CC=clang
+        export CLANG_TRIPLE=aarch64-linux-gnu-
+        export USE_CCACHE=1
+        ccache -M 10G
+
+        cd kernel
+        # polaris defconfig（sdm845/mi845 系列常用 mi845_defconfig，根据源码确认）
+        make O=out ARCH=arm64 mi845_defconfig
+        # 只启用基础 CONFIG_KSU=y（不加 SUSFS）
+        sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config || true
+        # 可选：如果想手动钩子（官方推荐可选）
+        sed -i 's/# CONFIG_KSU_MANUAL_HOOK is not set/CONFIG_KSU_MANUAL_HOOK=y/' out/.config || true
+        # KPM 实验可选（4.9 上可能不工作）
+        sed -i 's/# CONFIG_KPM is not set/CONFIG_KPM=y/' out/.config || true
+        sed -i 's/# CONFIG_KALLSYMS is not set/CONFIG_KALLSYMS=y/' out/.config
+        sed -i 's/# CONFIG_KALLSYMS_ALL is not set/CONFIG_KALLSYMS_ALL=y/' out/.config
+
+        make O=out -j$(nproc --all) 2>&1 | tee build.log
+
+    - name: Package with AnyKernel3
+      run: |
+        git clone https://github.com/osm0sis/AnyKernel3 --depth=1
+        cp kernel/out/arch/arm64/boot/Image* AnyKernel3/   # Image.gz-dtb 或 Image + dtb
+        cd AnyKernel3
+        sed -i 's/device.name1=.*/device.name1=polaris/' anykernel.sh
+        sed -i 's/block=.*/block=\/dev\/block\/bootdevice\/by-name\/boot;/' anykernel.sh
+        sed -i 's/ramdisk=.*/ramdisk=0;/' anykernel.sh   # su 内置内核，不 patch ramdisk
+        zip -r ../resukisu-polaris-basic-$(date +%Y%m%d).zip *
+        cd ..
+
+    - name: Upload the zip artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: resukisu-basic-kernel-zip
+        path: resukisu-polaris-basic-*.zip
+        retention-days: 7
